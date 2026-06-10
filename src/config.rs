@@ -4,6 +4,16 @@ use std::{env, process};
 use tracing::error;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LoggingConfig {
+    #[serde(default = "default_log_retention_days")]
+    pub log_retention_days: u64,
+}
+
+fn default_log_retention_days() -> u64 {
+    5
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HttpConfig {
     pub address: String,
     pub port: String,
@@ -172,6 +182,7 @@ pub struct AuthConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
     pub debug: bool,
+    pub logging: LoggingConfig,
     pub bap: Bap,
     pub http: HttpConfig,
     pub redis: RedisConfig,

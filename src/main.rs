@@ -7,8 +7,9 @@ use bap_onest_lite::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (_normal_guard, _perf_guard, _cron_guard) = setup_logging("app/logs", "bap-webhook");
     let config = AppConfig::new()?;
+    let (_normal_guard, _perf_guard, _cron_guard) =
+        setup_logging("app/logs", "bap-webhook", config.logging.log_retention_days);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 

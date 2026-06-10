@@ -1,7 +1,9 @@
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use chrono_tz::Asia::Kolkata;
 use std::fs;
+use std::path::Path;
 use std::time::Duration;
+use tracing::{error, info};
 use tracing_appender::{non_blocking::WorkerGuard, rolling};
 use tracing_subscriber::{
     fmt as tracing_fmt,
@@ -9,6 +11,7 @@ use tracing_subscriber::{
     prelude::*,
     EnvFilter,
 };
+
 // -----------------------
 // Custom India Time
 // -----------------------
@@ -22,13 +25,54 @@ impl FormatTime for IndiaTime {
 }
 
 // -----------------------
+// Log Cleanup Function
+// -----------------------
+fn cleanup_old_logs(log_dir: &str, days_to_keep: u64) {
+    let path = Path::new(log_dir);
+    if !path.exists() {
+        return;
+    }
+
+    let now = Utc::now();
+    let cutoff_time = now - ChronoDuration::days(days_to_keep as i64);
+
+    match fs::read_dir(path) {
+        Ok(entries) => {
+            for entry in entries.filter_map(Result::ok) {
+                let file_path = entry.path();
+                if file_path.is_file() {
+                    if let Ok(metadata) = fs::metadata(&file_path) {
+                        if let Ok(modified_time) = metadata.modified() {
+                            let modified_time: chrono::DateTime<Utc> = modified_time.into();
+                            if modified_time < cutoff_time {
+                                if let Err(e) = fs::remove_file(&file_path) {
+                                    error!("Failed to delete old log file {:?}: {}", file_path, e);
+                                } else {
+                                    info!("Deleted old log file: {:?}", file_path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => error!("Failed to read log directory {:?}: {}", path, e),
+    }
+}
+
+// -----------------------
 // Logging Setup
 // -----------------------
-pub fn setup_logging(log_dir: &str, svc: &str) -> (WorkerGuard, WorkerGuard, WorkerGuard) {
+pub fn setup_logging(
+    log_dir: &str,
+    svc: &str,
+    log_retention_days: u64,
+) -> (WorkerGuard, WorkerGuard, WorkerGuard) {
     // -----------------------
     // Normal Logs
     // -----------------------
     let normal_log_dir = format!("{}/{}", log_dir, svc);
+    cleanup_old_logs(&normal_log_dir, log_retention_days);
     fs::create_dir_all(&normal_log_dir).expect("Failed to create normal log directory");
     let normal_file_name = format!("{}.log", svc);
     let (normal_writer, normal_guard) =
@@ -46,6 +90,7 @@ pub fn setup_logging(log_dir: &str, svc: &str) -> (WorkerGuard, WorkerGuard, Wor
     // Performance Logs
     // -----------------------
     let perf_log_dir = format!("{}/perf", log_dir);
+    cleanup_old_logs(&perf_log_dir, log_retention_days);
     fs::create_dir_all(&perf_log_dir).expect("Failed to create perf log directory");
     let perf_file_name = format!("{}_perf.log", svc);
     let (perf_writer, perf_guard) =
@@ -65,6 +110,7 @@ pub fn setup_logging(log_dir: &str, svc: &str) -> (WorkerGuard, WorkerGuard, Wor
     // Cron Logs
     // -----------------------
     let cron_log_dir = format!("{}/cron", log_dir);
+    cleanup_old_logs(&cron_log_dir, log_retention_days);
     fs::create_dir_all(&cron_log_dir).expect("Failed to create cron log directory");
     let cron_file_name = format!("{}_cron.log", svc);
     let (cron_writer, cron_guard) =
