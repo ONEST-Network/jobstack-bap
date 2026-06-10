@@ -10,6 +10,15 @@
 debug: true
 
 # =============================================================================
+# Logging Configuration
+# =============================================================================
+logging:
+  # Number of days to keep log files.
+  # Logs older than this will be automatically deleted.
+  # Default: 5
+  log_retention_days: 5
+
+# =============================================================================
 # HTTP Server Configuration
 # =============================================================================
 http:
