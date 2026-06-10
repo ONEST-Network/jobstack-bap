@@ -24,7 +24,15 @@ pub async fn webhook_handler(
 ) -> impl IntoResponse {
     let txn_id = payload.context.transaction_id.clone();
     let msg_id = payload.context.message_id.clone();
-    info!("webhook called: action = {}, txn_id = {}", action, txn_id);
+    let bpp_id = payload.context.bpp_id.clone();
+    let bpp_uri = payload.context.bpp_uri.clone();
+    info!(
+        "webhook called: action = {}, txn_id = {}, bpp_id = {}, bpp_uri = {}",
+        action,
+        txn_id,
+        bpp_id.as_deref().unwrap_or(""),
+        bpp_uri.as_deref().unwrap_or("")
+    );
     println!("payload: {:?}", payload.context);
 
     let response = match action.as_str() {
