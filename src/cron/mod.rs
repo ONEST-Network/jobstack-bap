@@ -8,6 +8,8 @@ pub mod fetch_profiles;
 
 pub mod job_profile_match;
 mod notification;
+mod log_cleanup;
+
 pub async fn start_cron_jobs(state: Arc<AppState>) -> JobScheduler {
     let scheduler = JobScheduler::new().await.unwrap();
 
@@ -124,6 +126,30 @@ pub async fn start_cron_jobs(state: Arc<AppState>) -> JobScheduler {
                     let state = state.clone();
                     Box::pin(async move {
                         notification::run(state).await;
+                    })
+                }
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    /*
+     * ------------------------------------------------------------
+     * log_cleanup cron (runs every day at midnight)
+     * ------------------------------------------------------------
+     */
+
+    tracing::info!("📅 Scheduling log_cleanup cron: daily at midnight → 0 0 0 * * *");
+
+    scheduler
+        .add(
+            Job::new_async("0 0 0 * * *", {
+                let state = state.clone();
+                move |_uuid, _l| {
+                    let state = state.clone();
+                    Box::pin(async move {
+                        log_cleanup::run(state).await;
                     })
                 }
             })
