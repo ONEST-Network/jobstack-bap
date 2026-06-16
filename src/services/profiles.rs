@@ -7,6 +7,7 @@ use crate::db::profiles::{store_profiles, NewProfile};
 use crate::models::core::Context;
 use crate::services::payload_generator::build_profile_beckn_response;
 use crate::state::AppState;
+use crate::utils::cache::invalidate_v3_search_cache;
 use crate::utils::http_client::get_json;
 use crate::utils::profiles::{build_profiles_catalog, extract_pagination};
 use chrono::Utc;
@@ -14,6 +15,7 @@ use reqwest::header;
 use serde_json::Value;
 use std::sync::Arc;
 use tracing::{error, info};
+
 pub async fn handle_search_profiles(
     context: Context,
     message: Value,
@@ -68,8 +70,6 @@ pub async fn sync_profile_by_id(state: &Arc<AppState>, profile_id: &str) -> anyh
 
     let beckn_structure = build_beckn_structure(&profile.id, &profile.metadata);
 
-    let profile = &response.data[0];
-
     let new_profile = NewProfile {
         profile_id: profile.id.clone(),
         user_id: profile.user_id.clone(),
@@ -81,6 +81,7 @@ pub async fn sync_profile_by_id(state: &Arc<AppState>, profile_id: &str) -> anyh
     };
 
     store_profiles(&state.db_pool, &[new_profile]).await?;
+    invalidate_v3_search_cache(&state.redis_pool).await;
 
     info!("✅ Profile {} synced successfully", profile_id);
 

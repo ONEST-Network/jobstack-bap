@@ -10,6 +10,7 @@ use crate::db::{
 use crate::services::match_score::compute_match_score;
 use crate::state::AppState;
 use crate::utils::batching::chunk_vec;
+use crate::utils::cache::invalidate_v3_search_cache;
 use crate::utils::logging::format_duration;
 use std::time::Instant;
 use tracing::{error, info};
@@ -271,6 +272,8 @@ async fn compute_and_upsert(
             error = ?e,
             "failed to upsert match score"
         );
+    } else {
+        invalidate_v3_search_cache(&app_state.redis_pool).await;
     }
 }
 

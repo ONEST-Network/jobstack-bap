@@ -15,10 +15,11 @@ use crate::{
     services::payload_generator::build_beckn_payload,
     state::AppState,
     utils::{
+        cache::invalidate_v3_search_cache,
         empeding::{
             compute_empeding_match_score, job_text_for_embedding, profile_text_for_embedding,
         },
-        hash::generate_query_hash,
+        hash::{generate_generic_hash, generate_query_hash},
         http_client::post_json,
         search::{
             build_profile_json, extract_jobs_from_on_search, matches_exclude,
@@ -34,6 +35,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{error, event, info, Level};
 use uuid::Uuid;
+
 pub async fn handle_search(
     State(app_state): State<Arc<AppState>>,
     Json(req): Json<SearchRequest>,
@@ -833,8 +835,13 @@ pub async fn handle_cron_on_search_v2(
     txn_id: &str,
 ) -> Json<AckResponse> {
     let jobs = extract_jobs_from_on_search(&payload, txn_id);
-    if let Err(e) = store_jobs(&app_state.db_pool, &jobs).await {
-        error!("store_jobs failed: {}", e);
+    if !jobs.is_empty() {
+        if let Err(e) = store_jobs(&app_state.db_pool, &jobs).await {
+            error!("store_jobs failed: {}", e);
+        } else {
+            // Invalidate cache since job data has changed
+            invalidate_v3_search_cache(&app_state.redis_pool).await;
+        }
     }
     let pagination = payload
         .message
@@ -913,6 +920,10 @@ pub async fn handle_cron_on_search_v2(
     if received_pages.len() as u64 == total_pages {
         let stale_job_ids = match deactivate_stale_jobs(&app_state.db_pool, &bpp_id, txn_id).await {
             Ok(ids) => {
+                if !ids.is_empty() {
+                    // Invalidate cache since job data has changed
+                    invalidate_v3_search_cache(&app_state.redis_pool).await;
+                }
                 info!(
                     "🧹 Stale jobs cleaned up: {} rows deactivated (bpp_id={}, txn_id={})",
                     ids.len(),
@@ -968,6 +979,60 @@ pub async fn handle_search_v3(
     State(app_state): State<Arc<AppState>>,
     Json(req): Json<SearchRequestV2>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<JsonValue>)> {
+    let cache_config = if let Some(ref v3_cache) = app_state.config.cache.v3_search {
+        if v3_cache.enabled {
+            Some(v3_cache)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut conn = app_state.redis_pool.get().await.map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "error",
+                "message": "Failed to get redis connection",
+                "details": err.to_string()
+            })),
+        )
+    })?;
+
+    let cache_key = if cache_config.is_some() {
+        let version: i64 = match conn
+            .get(crate::utils::cache::V3_SEARCH_CACHE_VERSION_KEY)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to get v3 search cache version from Redis, defaulting to 0. Error: {:?}",
+                    e
+                );
+                0
+            }
+        };
+        let request_hash = generate_generic_hash(&req);
+        Some(format!(
+            "{}:{}:{}",
+            crate::utils::cache::V3_SEARCH_CACHE_KEY_PREFIX,
+            version,
+            request_hash
+        ))
+    } else {
+        None
+    };
+
+    if let Some(ref key) = cache_key {
+        if let Ok(cached_data) = conn.get::<_, String>(key).await {
+            if let Ok(json_value) = serde_json::from_str(&cached_data) {
+                return Ok(Json(json_value));
+            }
+        }
+    }
+
     let limit = req.limit.unwrap_or(20) as i64;
     let page = req.page.unwrap_or(1).max(1) as i64;
     let query = req.query.as_deref();
@@ -1011,12 +1076,25 @@ pub async fn handle_search_v3(
         )
     })?;
 
-    Ok(Json(json!({
+    let response = json!({
         "status": "ok",
         "page": page,
         "limit": limit,
         "data": data
-    })))
+    });
+
+    if let (Some(ref key), Some(cfg)) = (cache_key, cache_config) {
+        let response_str = serde_json::to_string(&response).unwrap_or_default();
+        let _: () = conn
+            .set_ex(key, response_str, cfg.ttl_secs)
+            .await
+            .map_err(|err| {
+                error!("Failed to cache v3 search result: {}", err);
+            })
+            .unwrap_or_default();
+    }
+
+    Ok(Json(response))
 }
 
 pub async fn handle_top_results(
