@@ -42,6 +42,20 @@ pub async fn start_http_server(
     let db_pool = PgPool::connect(&config.db.url).await?;
     info!("✅ connected to db at {}", &config.db.url);
 
+    // Log v3 search cache status
+    if let Some(ref v3_cache_config) = config.cache.v3_search {
+        if v3_cache_config.enabled {
+            info!(
+                "✅ v3 search cache is ENABLED with a TTL of {} seconds",
+                v3_cache_config.ttl_secs
+            );
+        } else {
+            info!("ℹ️ v3 search cache is DISABLED in configuration");
+        }
+    } else {
+        info!("ℹ️ v3 search cache is DISABLED (config missing)");
+    }
+
     let faiss = load_faiss(config.gcp.dimension, redis_pool.clone()).unwrap_or_else(|_| {
         info!("⚠️ No FAISS index found, creating new one");
         FaissService::new(config.gcp.dimension, redis_pool.clone())

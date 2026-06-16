@@ -63,10 +63,7 @@ pub fn cleanup_old_logs(log_dir: &str, days_to_keep: u64) {
 // -----------------------
 // Logging Setup
 // -----------------------
-pub fn setup_logging(
-    log_dir: &str,
-    svc: &str,
-) -> (WorkerGuard, WorkerGuard, WorkerGuard) {
+pub fn setup_logging(log_dir: &str, svc: &str) -> (WorkerGuard, WorkerGuard, WorkerGuard) {
     // -----------------------
     // Normal Logs
     // -----------------------

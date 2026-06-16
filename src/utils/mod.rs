@@ -1,4 +1,5 @@
 pub mod batching;
+pub mod cache;
 pub mod cron;
 pub mod empeding;
 pub mod external_apis;
