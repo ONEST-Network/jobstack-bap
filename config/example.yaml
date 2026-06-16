@@ -92,7 +92,17 @@ cache:
   # Example: 60 = 1 minute
   throttle_secs: 60
 
-# =============================================================================
+  # Optional: V3 Search Caching with auto-invalidation
+  # =================================================================
+  # Enable or disable caching for the /v3/search endpoint.
+  # This cache is automatically cleared when jobs, profiles, or match scores are updated.
+  v3_search:
+    enabled: true
+    # Time-to-live (in seconds) for each search result.
+    # Recommended: 300 (5 minutes)
+    ttl_secs: 300
+
+  # =============================================================================
 # Cron Jobs Configuration
 # =============================================================================
 # Scheduled background tasks using tokio-cron-scheduler

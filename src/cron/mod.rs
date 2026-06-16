@@ -7,8 +7,8 @@ mod fetch_jobs;
 pub mod fetch_profiles;
 
 pub mod job_profile_match;
-mod notification;
 mod log_cleanup;
+mod notification;
 
 pub async fn start_cron_jobs(state: Arc<AppState>) -> JobScheduler {
     let scheduler = JobScheduler::new().await.unwrap();

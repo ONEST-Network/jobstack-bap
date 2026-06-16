@@ -59,6 +59,14 @@ pub struct CacheConfig {
     pub result_ttl_secs: u64,
     pub txn_ttl_secs: u64,
     pub throttle_secs: u64,
+    #[serde(default)]
+    pub v3_search: Option<V3SearchCacheConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct V3SearchCacheConfig {
+    pub enabled: bool,
+    pub ttl_secs: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

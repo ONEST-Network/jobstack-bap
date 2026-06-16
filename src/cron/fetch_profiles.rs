@@ -1,6 +1,7 @@
 use crate::cron::job_profile_match;
 use crate::db::profiles::{delete_stale_profiles, store_profiles, NewProfile};
 use crate::state::AppState;
+use crate::utils::cache::invalidate_v3_search_cache;
 use crate::utils::http_client::get_json;
 use chrono::{DateTime, Utc};
 use reqwest::header;
@@ -149,10 +150,14 @@ pub async fn run(app_state: Arc<AppState>) {
             })
             .collect();
 
-        if let Err(e) = store_profiles(&app_state.db_pool, &profiles).await {
-            error!("❌ Failed to store profiles: {:?}", e);
-            sync_completed = false;
-            break;
+        if !profiles.is_empty() {
+            if let Err(e) = store_profiles(&app_state.db_pool, &profiles).await {
+                error!("❌ Failed to store profiles: {:?}", e);
+                sync_completed = false;
+                break;
+            } else {
+                invalidate_v3_search_cache(&app_state.redis_pool).await;
+            }
         }
 
         let fetched = page * limit;
@@ -167,6 +172,9 @@ pub async fn run(app_state: Arc<AppState>) {
     if sync_completed {
         match delete_stale_profiles(&app_state.db_pool, sync_started_at).await {
             Ok(count) => {
+                if count > 0 {
+                    invalidate_v3_search_cache(&app_state.redis_pool).await;
+                }
                 info!(target: "cron", "🧹 Deleted {} stale profiles", count);
             }
             Err(e) => {
