@@ -177,22 +177,24 @@ pub async fn fetch_jobs_with_matches(
     limit: i64,
     offset: i64,
 ) -> Result<Value, sqlx::Error> {
-    // --- Build the full-text search query string ---
     let mut fts_queries: Vec<String> = Vec::new();
 
-    // 1. Main query: "term1 & term2 & ..."
     if let Some(q) = query {
-        let main_query = q.split(',')
-            .map(|s| s.trim())
+        let mut parts: Vec<String> = q.split(',')
+            .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .collect::<Vec<&str>>()
-            .join(" & ");
+            .collect();
+        
+        if let Some(last) = parts.last_mut() {
+            last.push_str(":*");
+        }
+
+        let main_query = parts.join(" & ");
         if !main_query.is_empty() {
             fts_queries.push(format!("({})", main_query));
         }
     }
 
-    // 2. Primary filters: "(filter1 | filter2 | ...)"
     if let Some(pf) = primary_filters {
         let primary_query = pf.split(',')
             .map(|s| s.trim())
@@ -204,7 +206,6 @@ pub async fn fetch_jobs_with_matches(
         }
     }
 
-    // 3. Exclude filters: "!filter1 & !filter2 & ..."
     if let Some(ef) = exclude_filters {
         let exclude_query = ef.split(',')
             .map(|s| s.trim())
