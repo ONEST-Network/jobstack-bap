@@ -1,6 +1,8 @@
 use crate::db::{job::JobRow, profiles::ProfileRow};
 use serde_json::Value;
 use sqlx::{query, query_as, query_scalar, FromRow, PgPool};
+use std::time::Instant;
+use tracing::info;
 use uuid::Uuid;
 
 #[derive(Debug, FromRow, Clone)]
@@ -177,11 +179,58 @@ pub async fn fetch_jobs_with_matches(
     limit: i64,
     offset: i64,
 ) -> Result<Value, sqlx::Error> {
+    // --- Build the full-text search query string ---
+    let mut fts_queries: Vec<String> = Vec::new();
+
+    // 1. Main query: "term1 & term2 & ..."
+    if let Some(q) = query {
+        let main_query = q.split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<&str>>()
+            .join(" & ");
+        if !main_query.is_empty() {
+            fts_queries.push(format!("({})", main_query));
+        }
+    }
+
+    // 2. Primary filters: "(filter1 | filter2 | ...)"
+    if let Some(pf) = primary_filters {
+        let primary_query = pf.split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<&str>>()
+            .join(" | ");
+        if !primary_query.is_empty() {
+            fts_queries.push(format!("({})", primary_query));
+        }
+    }
+
+    // 3. Exclude filters: "!filter1 & !filter2 & ..."
+    if let Some(ef) = exclude_filters {
+        let exclude_query = ef.split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("!{}", s))
+            .collect::<Vec<String>>()
+            .join(" & ");
+        if !exclude_query.is_empty() {
+            fts_queries.push(exclude_query);
+        }
+    }
+    
+    let fts_query = if fts_queries.is_empty() {
+        None
+    } else {
+        Some(fts_queries.join(" & "))
+    };
+
     match profile_id {
         // ============================================================
         // CASE 1: Profile present → matched jobs
         // ============================================================
         Some(profile_id) => {
+            let start = Instant::now();
             let total: i64 = query_scalar(
                 r#"
                 SELECT COUNT(*)
@@ -190,79 +239,18 @@ pub async fn fetch_jobs_with_matches(
                 JOIN profiles p ON p.id = jpm.profile_id
                 WHERE p.profile_id = $1
                 AND j.is_active = true
-                 
-                -- 🔍 fuzzy query
-                AND (
-                  $2::text IS NULL
-                  OR EXISTS (
-                    SELECT 1
-                    FROM unnest(string_to_array($2, ',')) q(raw_q)
-                    WHERE (
-                      COALESCE(j.beckn_structure #>> '{descriptor,name}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,industry}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,role}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,jobDetails,title}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{locations,city}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{locations,state}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,basicInfo,jobProviderName}', '') % trim(q.raw_q)
-                    )
-                  )
-                )
-
-                -- ❌ exclude filters
-                AND (
-                  $4::text IS NULL
-                  OR NOT EXISTS (
-                    SELECT 1
-                    FROM unnest(string_to_array($4, ',')) ef(raw_ef)
-                    WHERE (
-                      COALESCE(j.beckn_structure #>> '{tags,role}', '') ILIKE '%' || trim(ef.raw_ef) || '%'
-                      OR COALESCE(j.beckn_structure #>> '{tags,industry}', '') ILIKE '%' || trim(ef.raw_ef) || '%'
-                      OR COALESCE(j.beckn_structure #>> '{descriptor,name}', '') ILIKE '%' || trim(ef.raw_ef) || '%'
-                    )
-                  )
-                )
-
-                -- ✅ primary filters (ONLY allowed roles)
-                AND (
-                  $3::text IS NULL
-                  OR (
-                    EXISTS (
-                      SELECT 1
-                      FROM unnest(string_to_array($3, ',')) pf(raw_pf)
-                      WHERE (
-                        COALESCE(j.beckn_structure #>> '{tags,role}', '') ILIKE '%' || trim(pf.raw_pf) || '%'
-                        OR COALESCE(j.beckn_structure #>> '{tags,industry}', '') ILIKE '%' || trim(pf.raw_pf) || '%'
-                        OR COALESCE(j.beckn_structure #>> '{descriptor,name}', '') ILIKE '%' || trim(pf.raw_pf) || '%'
-                      )
-                    )
-                    AND NOT EXISTS (
-                      SELECT 1
-                      FROM regexp_split_to_table(
-                        COALESCE(j.beckn_structure #>> '{tags,role}', ''),
-                        '[,/|]'
-                      ) r(role)
-                      WHERE trim(r.role) <> ''
-                      AND trim(r.role) NOT ILIKE ALL (
-                        SELECT '%' || trim(pf2.raw_pf) || '%'
-                        FROM unnest(string_to_array($3, ',')) pf2(raw_pf)
-                      )
-                    )
-                  )
-                )
+                AND ($2::text IS NULL OR j.search_tsv @@ to_tsquery('simple', $2))
                 "#,
             )
             .bind(profile_id)
-            .bind(query)
-            .bind(primary_filters)
-            .bind(exclude_filters)
+            .bind(fts_query.as_deref())
             .fetch_one(db_pool)
             .await?;
 
             let items: Vec<Value> = query_scalar(
                 r#"
                 SELECT jsonb_build_object(
-                     'job', to_jsonb(j.*) - 'embedding',
+                    'job', to_jsonb(j.*) - 'embedding' - 'search_tsv',
                     'profile_id', p.profile_id,
                     'match_score', jpm.match_score
                 )
@@ -271,72 +259,13 @@ pub async fn fetch_jobs_with_matches(
                 JOIN profiles p ON p.id = jpm.profile_id
                 WHERE p.profile_id = $1
                 AND j.is_active = true
-
-                AND (
-                  $2::text IS NULL
-                  OR EXISTS (
-                    SELECT 1
-                    FROM unnest(string_to_array($2, ',')) q(raw_q)
-                    WHERE (
-                      COALESCE(j.beckn_structure #>> '{descriptor,name}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,industry}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,role}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,jobDetails,title}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{locations,city}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{locations,state}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,basicInfo,jobProviderName}', '') % trim(q.raw_q)
-                    )
-                  )
-                )
-
-                AND (
-                  $4::text IS NULL
-                  OR NOT EXISTS (
-                    SELECT 1
-                    FROM unnest(string_to_array($4, ',')) ef(raw_ef)
-                    WHERE (
-                      COALESCE(j.beckn_structure #>> '{tags,role}', '') ILIKE '%' || trim(ef.raw_ef) || '%'
-                      OR COALESCE(j.beckn_structure #>> '{tags,industry}', '') ILIKE '%' || trim(ef.raw_ef) || '%'
-                      OR COALESCE(j.beckn_structure #>> '{descriptor,name}', '') ILIKE '%' || trim(ef.raw_ef) || '%'
-                    )
-                  )
-                )
-
-               AND (
-                  $3::text IS NULL
-                  OR (
-                    EXISTS (
-                      SELECT 1
-                      FROM unnest(string_to_array($3, ',')) pf(raw_pf)
-                      WHERE (
-                        COALESCE(j.beckn_structure #>> '{tags,role}', '') ILIKE '%' || trim(pf.raw_pf) || '%'
-                        OR COALESCE(j.beckn_structure #>> '{tags,industry}', '') ILIKE '%' || trim(pf.raw_pf) || '%'
-                        OR COALESCE(j.beckn_structure #>> '{descriptor,name}', '') ILIKE '%' || trim(pf.raw_pf) || '%'
-                      )
-                    )
-                    AND NOT EXISTS (
-                      SELECT 1
-                      FROM regexp_split_to_table(
-                        COALESCE(j.beckn_structure #>> '{tags,role}', ''),
-                        '[,/|]'
-                      ) r(role)
-                      WHERE trim(r.role) <> ''
-                      AND trim(r.role) NOT ILIKE ALL (
-                        SELECT '%' || trim(pf2.raw_pf) || '%'
-                        FROM unnest(string_to_array($3, ',')) pf2(raw_pf)
-                      )
-                    )
-                  )
-                )
-
+                AND ($2::text IS NULL OR j.search_tsv @@ to_tsquery('simple', $2))
                 ORDER BY jpm.match_score DESC, j.id ASC
-                LIMIT $5 OFFSET $6
+                LIMIT $3 OFFSET $4
                 "#,
             )
             .bind(profile_id)
-            .bind(query)
-            .bind(primary_filters)
-            .bind(exclude_filters)
+            .bind(fts_query.as_deref())
             .bind(limit)
             .bind(offset)
             .fetch_all(db_pool)
@@ -346,118 +275,37 @@ pub async fn fetch_jobs_with_matches(
         }
 
         // ============================================================
-        // CASE 2: No profile → jobs only
+        // CASE 2: No profile → jobs only (Optimized)
         // ============================================================
         None => {
+            let start = Instant::now();
             let total: i64 = query_scalar(
                 r#"
                 SELECT COUNT(*)
                 FROM jobs j
                 WHERE j.is_active = true
-                AND (
-                  $1::text IS NULL
-                  OR EXISTS (
-                    SELECT 1
-                    FROM unnest(string_to_array($1, ',')) q(raw_q)
-                    WHERE (
-                      COALESCE(j.beckn_structure #>> '{descriptor,name}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,industry}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,role}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,jobDetails,title}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{locations,city}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{locations,state}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,basicInfo,jobProviderName}', '') % trim(q.raw_q)
-                    )
-                  )
-                )
-                AND (
-                  $3::text IS NULL
-                  OR NOT EXISTS (
-                    SELECT 1
-                    FROM unnest(string_to_array($3, ',')) ef(raw_ef)
-                    WHERE (
-                      COALESCE(j.beckn_structure #>> '{tags,role}', '') ILIKE '%' || trim(ef.raw_ef) || '%'
-                      OR COALESCE(j.beckn_structure #>> '{tags,industry}', '') ILIKE '%' || trim(ef.raw_ef) || '%'
-                      OR COALESCE(j.beckn_structure #>> '{descriptor,name}', '') ILIKE '%' || trim(ef.raw_ef) || '%'
-                    )
-                  )
-                )
-                AND (
-                  $2::text IS NULL
-                  OR EXISTS (
-                    SELECT 1
-                    FROM unnest(string_to_array($2, ',')) pf(raw_pf)
-                    WHERE (
-                      COALESCE(j.beckn_structure #>> '{tags,role}', '') ILIKE '%' || trim(pf.raw_pf) || '%'
-                      OR COALESCE(j.beckn_structure #>> '{tags,industry}', '') ILIKE '%' || trim(pf.raw_pf) || '%'
-                      OR COALESCE(j.beckn_structure #>> '{descriptor,name}', '') ILIKE '%' || trim(pf.raw_pf) || '%'
-                    )
-                  )
-                )
+                AND ($1::text IS NULL OR j.search_tsv @@ to_tsquery('simple', $1))
                 "#,
             )
-            .bind(query)
-            .bind(primary_filters)
-            .bind(exclude_filters)
+            .bind(fts_query.as_deref())
             .fetch_one(db_pool)
             .await?;
 
             let items: Vec<Value> = query_scalar(
                 r#"
                 SELECT jsonb_build_object(
-                    'job', to_jsonb(j.*) - 'embedding',
+                    'job', to_jsonb(j.*) - 'embedding' - 'search_tsv',
                     'profile_id', NULL,
                     'match_score', NULL
                 )
                 FROM jobs j
                 WHERE j.is_active = true
-                AND (
-                  $1::text IS NULL
-                  OR EXISTS (
-                    SELECT 1
-                    FROM unnest(string_to_array($1, ',')) q(raw_q)
-                    WHERE (
-                      COALESCE(j.beckn_structure #>> '{descriptor,name}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,industry}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,role}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,jobDetails,title}', '') % trim(q.raw_q)   
-                      OR COALESCE(j.beckn_structure #>> '{locations,city}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{locations,state}', '') % trim(q.raw_q)
-                      OR COALESCE(j.beckn_structure #>> '{tags,basicInfo,jobProviderName}', '') % trim(q.raw_q)
-                    )
-                  )
-                )
-                AND (
-                  $3::text IS NULL
-                  OR NOT EXISTS (
-                    SELECT 1
-                    FROM unnest(string_to_array($3, ',')) ef(raw_ef)
-                    WHERE (
-                      COALESCE(j.beckn_structure #>> '{tags,role}', '') ILIKE '%' || trim(ef.raw_ef) || '%'
-                      OR COALESCE(j.beckn_structure #>> '{tags,industry}', '') ILIKE '%' || trim(ef.raw_ef) || '%'
-                      OR COALESCE(j.beckn_structure #>> '{descriptor,name}', '') ILIKE '%' || trim(ef.raw_ef) || '%'
-                    )
-                  )
-                )
-                AND (
-                  $2::text IS NULL
-                  OR EXISTS (
-                    SELECT 1
-                    FROM unnest(string_to_array($2, ',')) pf(raw_pf)
-                    WHERE (
-                      COALESCE(j.beckn_structure #>> '{tags,role}', '') ILIKE '%' || trim(pf.raw_pf) || '%'
-                      OR COALESCE(j.beckn_structure #>> '{tags,industry}', '') ILIKE '%' || trim(pf.raw_pf) || '%'
-                      OR COALESCE(j.beckn_structure #>> '{descriptor,name}', '') ILIKE '%' || trim(pf.raw_pf) || '%'
-                    )
-                  )
-                )
+                AND ($1::text IS NULL OR j.search_tsv @@ to_tsquery('simple', $1))
                 ORDER BY j.created_at DESC, j.id ASC
-                LIMIT $4 OFFSET $5
+                LIMIT $2 OFFSET $3
                 "#,
             )
-            .bind(query)
-            .bind(primary_filters)
-            .bind(exclude_filters)
+            .bind(fts_query.as_deref())
             .bind(limit)
             .bind(offset)
             .fetch_all(db_pool)
