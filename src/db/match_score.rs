@@ -1,8 +1,6 @@
 use crate::db::{job::JobRow, profiles::ProfileRow};
 use serde_json::Value;
 use sqlx::{query, query_as, query_scalar, FromRow, PgPool};
-use std::time::Instant;
-use tracing::info;
 use uuid::Uuid;
 
 #[derive(Debug, FromRow, Clone)]
@@ -230,7 +228,6 @@ pub async fn fetch_jobs_with_matches(
         // CASE 1: Profile present → matched jobs
         // ============================================================
         Some(profile_id) => {
-            let start = Instant::now();
             let total: i64 = query_scalar(
                 r#"
                 SELECT COUNT(*)
@@ -278,7 +275,6 @@ pub async fn fetch_jobs_with_matches(
         // CASE 2: No profile → jobs only (Optimized)
         // ============================================================
         None => {
-            let start = Instant::now();
             let total: i64 = query_scalar(
                 r#"
                 SELECT COUNT(*)
