@@ -1,0 +1,21 @@
+# This configuration applies linker flags ONLY when compiling for macOS targets.
+# This ensures that the build can find the Homebrew-installed FAISS library
+# without affecting builds on other operating systems like Linux (e.g., in Docker).
+
+# --- Apple Silicon Macs ---
+[target.aarch64-apple-darwin]
+rustflags = [
+  # Add the Homebrew library path for FAISS to the linker's search path.
+  "-L", "/opt/homebrew/opt/faiss/lib",
+  # Explicitly tell the linker to link against the 'faiss_c' library.
+  "-C", "link-arg=-lfaiss_c"
+]
+
+# --- Intel-based Macs ---
+[target.x86_64-apple-darwin]
+rustflags = [
+  # Add the Homebrew library path for FAISS to the linker's search path.
+  "-L", "/opt/homebrew/opt/faiss/lib",
+  # Explicitly tell the linker to link against the 'faiss_c' library.
+  "-C", "link-arg=-lfaiss_c"
+]
